@@ -1,0 +1,46 @@
+.video-container {
+    position: relative;
+    display: inline-block;
+    margin: 10px;
+}
+.stream-status {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    padding: 5px 10px;
+    border-radius: 5px;
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+    z-index: 10;
+    background-color: #16a34a; /* Green for normal */
+}
+.stream-status.suspicious {
+    background-color: #dc2626; /* Red for suspicious */
+}
+.status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px;
+    border-radius: 5px;
+}
+.status.normal {
+    background-color: #16a34a;
+    color: white;
+}
+.status.suspicious {
+    background-color: #dc2626;
+    color: white;
+}
+#incident-list {
+    list-style-type: none;
+    padding: 0;
+}
+#incident-list li {
+    padding: 5px;
+    border-bottom: 1px solid #ccc;
+}
+.hidden {
+    display: none;
+}
