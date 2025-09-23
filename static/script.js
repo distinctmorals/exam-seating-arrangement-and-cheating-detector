@@ -329,7 +329,7 @@ async function init() {
     for (const stream of streams) {
         await setupCamera(stream.streamId);
     }
-    setInterval(detectFaces, 2000);
+    setInterval(detectFaces, 1000);
     setInterval(loadIncidents, 5000);
 }
 

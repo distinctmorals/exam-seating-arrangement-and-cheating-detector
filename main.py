@@ -178,7 +178,7 @@ async def process_yolo(rgb_img, stream_id):
     print(f"Stream {stream_id}: All detected objects: {all_objects}")
     return detected_objects, all_objects
 
-async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles=None):
+async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles=None, prev_looking_down_timestamps=None):
     if not stream_id:
         raise ValueError("stream_id is not defined")
     pose_results = await asyncio.get_event_loop().run_in_executor(
@@ -188,6 +188,8 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
     current_keypoints = []
     current_head_angles = []
     person_hands = []
+    current_looking_down_timestamps = []
+    current_time = datetime.datetime.now(pytz.UTC).timestamp()
     if pose_results and pose_results[0].boxes and pose_results[0].keypoints:
         boxes = pose_results[0].boxes
         keypoints = pose_results[0].keypoints
@@ -230,8 +232,8 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                     current_head_angles.append(relative_angle)
                     print(f"Stream {stream_id}: Head angle: {head_angle:.2f}, Shoulder angle: {shoulder_angle:.2f}, Relative angle: {relative_angle:.2f}, Using eyes: {use_eyes}")
                     direction = "left" if head_angle > shoulder_angle else "right"
-                    if relative_angle > 45 or (one_ear_missing and missing_ear):
-                        if relative_angle > 55 or (one_ear_missing and missing_ear):
+                    if relative_angle > 30 or (one_ear_missing and missing_ear):
+                        if relative_angle > 40 or (one_ear_missing and missing_ear):
                             incidents.append(f"looking_at_answers_{direction}")
                             print(f"Stream {stream_id}: Suspected looking at another's answers ({direction})")
                         else:
@@ -249,12 +251,25 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                               f"Nose conf={kp_conf[0]:.2f}, Left {'eye' if use_eyes else 'ear'} conf={left_conf:.2f}, "
                               f"Right {'eye' if use_eyes else 'ear'} conf={right_conf:.2f}, "
                               f"Left shoulder conf={kp_conf[5]:.2f}, Right shoulder conf={kp_conf[6]:.2f}")
+                # Looking down detection
+                looking_down = False
+                if kp_conf[0] >= 0.3 and kp_conf[1] >= 0.3 and kp_conf[2] >= 0.3:
+                    avg_eyes_y = (left_eye[1] + right_eye[1]) / 2
+                    nose_y = nose[1]
+                    if nose_y > avg_eyes_y + 10:  # Increased threshold for reliability
+                        looking_down = True
+                        print(f"Stream {stream_id}: Person {idx} looking down (nose_y={nose_y:.2f}, avg_eyes_y={avg_eyes_y:.2f})")
+                if looking_down:
+                    current_looking_down_timestamps.append(current_time)
+                else:
+                    current_looking_down_timestamps.append(None)
                 # Collect hands
                 left_hand = kp[9] if kp_conf[9] >= 0.3 else None
                 right_hand = kp[10] if kp_conf[10] >= 0.3 else None
                 person_hands.append({'left': left_hand, 'right': right_hand})
             else:
                 print(f"Stream {stream_id}: No valid keypoints for person {idx}")
+                current_looking_down_timestamps.append(None)
         # Check closeness between hands of different persons
         for p1 in range(len(person_hands)):
             for p2 in range(p1 + 1, len(person_hands)):
@@ -263,7 +278,7 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                 for h1 in hands1:
                     for h2 in hands2:
                         dist = np.sqrt((h1[0] - h2[0])**2 + (h1[1] - h2[1])**2)
-                        if dist < 50:
+                        if dist < 30:
                             incidents.append("paper_passing_suspected")
                             print(f"Stream {stream_id}: Paper passing suspected between persons {p1} and {p2}, dist {dist:.2f}")
         # Sort keypoints by nose x for matching across frames
@@ -283,16 +298,29 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                 prev_right = prev_kp[10]
                 if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.3:
                     left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
-                    if left_dist > 50:
+                    if left_dist > 30:
                         incidents.append("paper_passing_suspected")
                 if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.3:
                     right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
-                    if right_dist > 50:
+                    if right_dist > 30:
                         incidents.append("paper_passing_suspected")
+        # Looking down persistence
+        if prev_looking_down_timestamps and len(prev_looking_down_timestamps) == len(current_looking_down_timestamps):
+            for p in range(len(current_looking_down_timestamps)):
+                if current_looking_down_timestamps[p] and prev_looking_down_timestamps[p]:
+                    duration = current_time - prev_looking_down_timestamps[p]
+                    if duration >= 2:
+                        incidents.append("looking_down_suspected")
+                        print(f"Stream {stream_id}: Looking down suspected for person {p}, duration {duration:.2f}s")
+                elif current_looking_down_timestamps[p] is None:
+                    current_looking_down_timestamps[p] = None  # Reset timestamp if not looking down
+        else:
+            print(f"Stream {stream_id}: No previous looking down state")
     else:
         print(f"Stream {stream_id}: No pose detections")
+        current_looking_down_timestamps = [None] * len(current_keypoints)
     print(f"Stream {stream_id}: Pose incidents: {incidents}, Head angles: {current_head_angles}")
-    return incidents, current_keypoints, current_head_angles
+    return incidents, current_keypoints, current_head_angles, current_looking_down_timestamps
 
 # Detect cheating endpoint
 @app.post("/detect")
@@ -301,6 +329,7 @@ async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
     wat_tz = pytz.timezone('Africa/Lagos')
     prev_keypoints_map = {}
     prev_head_angles_map = {}
+    prev_looking_down_timestamps_map = {}
     try:
         for stream in data.streams:
             if not stream.stream_id:
@@ -318,13 +347,15 @@ async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
             img_resized = cv2.resize(img, (192, 192), interpolation=cv2.INTER_AREA)
             rgb_img = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
             detected_objects, all_objects = await process_yolo(rgb_img, stream.stream_id)
-            pose_incidents, current_keypoints, current_head_angles = await process_pose(
+            pose_incidents, current_keypoints, current_head_angles, current_looking_down_timestamps = await process_pose(
                 rgb_img, stream.stream_id, 
                 prev_keypoints_map.get(stream.stream_id), 
-                prev_head_angles_map.get(stream.stream_id, [])
+                prev_head_angles_map.get(stream.stream_id, []),
+                prev_looking_down_timestamps_map.get(stream.stream_id, [])
             )
             prev_keypoints_map[stream.stream_id] = current_keypoints
             prev_head_angles_map[stream.stream_id] = current_head_angles
+            prev_looking_down_timestamps_map[stream.stream_id] = current_looking_down_timestamps
             primary_incident = "Normal"
             if detected_objects:
                 primary_incident = f"Objects Detected: {', '.join([obj['label'] for obj in detected_objects])}"
