@@ -4,31 +4,68 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Exam Cheating Detector</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gray-100 font-sans">
-    <div class="container mx-auto p-6 bg-white rounded-lg shadow-lg max-w-4xl">
-        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Exam Proctoring System</h1>
-        <div class="mb-4">
-            <label for="cameraSelect" class="block text-sm font-medium text-gray-700">Select Camera:</label>
-            <select id="cameraSelect" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"></select>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+        <!-- Login Form -->
+        <div id="login-form">
+            <h2 class="text-2xl font-bold mb-6 text-center">Login</h2>
+            <form action="/login" method="POST" class="space-y-4">
+                <div>
+                    <label for="login-username" class="block text-sm font-medium text-gray-700">Username</label>
+                    <input type="text" id="login-username" name="username" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label for="login-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="login-password" name="password" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <button type="submit"
+                        class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Login</button>
+                <p class="mt-4 text-center text-sm">
+                    Don't have an account? <a href="#" onclick="toggleForm('signup')" class="text-indigo-600 hover:underline">Sign up</a>
+                </p>
+            </form>
         </div>
-        <div class="video-grid">
-            <!-- Video stream will be dynamically added here -->
-        </div>
-        <div id="status" class="status flex items-center justify-center p-4 rounded-md mb-4">
-            <span id="statusIcon" class="mr-2"></span>
-            <span id="statusText">Initializing...</span>
-        </div>
-        <div id="incidents" class="bg-gray-50 p-4 rounded-md">
-            <div class="flex justify-between items-center">
-                <h2 class="text-xl font-semibold text-gray-700">Detected Incidents</h2>
-                <button id="toggleIncidents" class="text-blue-600 hover:text-blue-800 text-sm">Show/Hide</button>
-            </div>
-            <ul id="incident-list" class="mt-2 space-y-2 hidden"></ul>
+        <!-- Signup Form -->
+        <div id="signup-form" class="hidden">
+            <h2 class="text-2xl font-bold mb-6 text-center">Sign Up</h2>
+            <form action="/signup" method="POST" class="space-y-4">
+                <div>
+                    <label for="signup-username" class="block text-sm font-medium text-gray-700">Username</label>
+                    <input type="text" id="signup-username" name="username" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div>
+                    <label for="signup-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="signup-password" name="password" required
+                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <button type="submit"
+                        class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Sign Up</button>
+                <p class="mt-4 text-center text-sm">
+                    Already have an account? <a href="#" onclick="toggleForm('login')" class="text-indigo-600 hover:underline">Login</a>
+                </p>
+            </form>
         </div>
     </div>
-    <script src="/static/script.js"></script>
+    <script>
+        function toggleForm(form) {
+            document.getElementById('login-form').classList.toggle('hidden', form !== 'login');
+            document.getElementById('signup-form').classList.toggle('hidden', form !== 'signup');
+            console.log(`Toggled to ${form} form`);
+        }
+
+        // Handle success/error messages and show login form after signup
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('message')) {
+            alert(urlParams.get('message'));
+            toggleForm('login');
+            window.history.replaceState({}, document.title, "/");
+            console.log('Processed URL message and switched to login form');
+        }
+    </script>
 </body>
 </html>

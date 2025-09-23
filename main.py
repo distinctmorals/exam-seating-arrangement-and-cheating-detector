@@ -1,25 +1,31 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List
 import datetime
-import pytz
+import uuid
 from database import SessionLocal
-from models import CheatingIncident
+from models import CheatingIncident, User, SessionModel
 import numpy as np
 import base64
 import cv2
 from ultralytics import YOLO
 import asyncio
 import os
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
+import pytz
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 # Load YOLOv8n model for object detection and pose estimation
 try:
-    yolo_model = YOLO('yolov8n.pt')  # Nano model for object detection
+    yolo_model = YOLO('yolov8n.pt')
     print("Object detection model loaded successfully")
 except Exception as e:
     raise Exception(f"Failed to load yolov8n.pt: {str(e)}")
@@ -28,11 +34,20 @@ try:
     pose_model_path = 'yolov8n-pose.pt'
     if not os.path.exists(pose_model_path):
         raise FileNotFoundError(f"Model file {pose_model_path} not found in {os.getcwd()}")
-    pose_model = YOLO(pose_model_path)  # Nano model for pose estimation
+    pose_model = YOLO(pose_model_path)
     print("Pose estimation model loaded successfully")
 except Exception as e:
     raise Exception(f"Failed to load yolov8n-pose.pt: {str(e)}")
 
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Pydantic model for stream data
 class StreamData(BaseModel):
     image: str
     user_id: str
@@ -42,13 +57,107 @@ class StreamData(BaseModel):
 class MultiStreamData(BaseModel):
     streams: List[StreamData]
 
+# Get current user from session ID in query parameter
+async def get_current_user(session_id: str = None, db: Session = Depends(get_db)):
+    print(f"get_current_user: Retrieved session_id: {session_id}")
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated - no session ID provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
+    print(f"get_current_user: Database query for session_id '{session_id}' returned: {session}")
+    if session is None or session.expires_at < datetime.datetime.now():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = db.query(User).filter(User.id == session.user_id).first()
+    print(f"get_current_user: Database query for user_id '{session.user_id}' returned: {user}")
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found for session",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+# User signup route (handles form data, redirects to /)
+@app.post("/signup", response_class=HTMLResponse)
+async def signup(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == username).first()
+    if db_user:
+        print(f"Signup: Username '{username}' already exists")
+        return HTMLResponse(
+            content='<script>alert("Username already exists"); window.location="/";</script>'
+        )
+    hashed_password = pwd_context.hash(password)
+    new_user = User(username=username, password=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    print(f"Signup: Created user '{username}' with id {new_user.id}")
+    return HTMLResponse(
+        content='<script>alert("Account created! Please log in."); window.location="/";</script>'
+    )
+
+# User login route (handles form data, creates session, redirects to /dashboard)
+@app.post("/login", response_class=HTMLResponse)
+async def login(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    print(f"Login: Attempting login for username '{username}'")
+    db_user = db.query(User).filter(User.username == username).first()
+    if not db_user or not pwd_context.verify(password, db_user.password):
+        print(f"Login: Invalid credentials for username '{username}'")
+        return HTMLResponse(
+            content='<script>alert("Invalid username or password"); window.location="/";</script>'
+        )
+    # Create a session
+    session_id = str(uuid.uuid4())
+    expires_at = datetime.datetime.now() + datetime.timedelta(minutes=30)
+    new_session = SessionModel(
+        session_id=session_id,
+        user_id=db_user.id,
+        expires_at=expires_at
+    )
+    db.add(new_session)
+    db.commit()
+    print(f"Login: Created session '{session_id}' for user '{username}'")
+    return RedirectResponse(url=f"/dashboard?session_id={session_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+# User logout route
+@app.get("/logout")
+async def logout(session_id: str = None, db: Session = Depends(get_db)):
+    print(f"Logout: Received session_id: {session_id}")
+    if session_id:
+        session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
+        if session:
+            db.delete(session)
+            db.commit()
+            print(f"Logout: Deleted session '{session_id}'")
+    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+
+# Dashboard route (protected)
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(current_user: User = Depends(get_current_user), session_id: str = None):
+    print(f"Dashboard: Accessed by user '{current_user.username}' with session_id '{session_id}'")
+    with open("static/dashboard.html", "r") as f:
+        content = f.read()
+    # Pass session_id to dashboard.html for further navigation
+    content = content.replace(
+        '<a href="/logout?session_id={session_id}">Log out</a>',
+        f'<a href="/logout?session_id={session_id}">Log out</a>'
+    )
+    return HTMLResponse(content=content)
+
+# Root route (serves index.html)
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
 async def process_yolo(rgb_img, stream_id):
-    """Run YOLO detection asynchronously for phones, paper, books."""
     yolo_results = await asyncio.get_event_loop().run_in_executor(
         None, lambda: yolo_model(rgb_img, conf=0.3, classes=[0, 67, 73, 75], device='cpu')
     )
@@ -67,45 +176,34 @@ async def process_yolo(rgb_img, stream_id):
     return detected_objects, all_objects
 
 async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles=None):
-    """Run pose estimation to detect communication and looking at another's answers."""
     if not stream_id:
         raise ValueError("stream_id is not defined")
-    
     pose_results = await asyncio.get_event_loop().run_in_executor(
         None, lambda: pose_model(rgb_img, conf=0.3, device='cpu')
     )
     incidents = []
     current_keypoints = []
     current_head_angles = []
-
-    # Handle pose results
     if pose_results and pose_results[0].boxes and pose_results[0].keypoints:
-        # Sort boxes by confidence to prioritize the most confident person
         boxes = pose_results[0].boxes
         keypoints = pose_results[0].keypoints
-        sorted_indices = np.argsort(-boxes.conf.cpu().numpy())  # Descending order
-        
-        # Process only the highest-confidence person
+        sorted_indices = np.argsort(-boxes.conf.cpu().numpy())
         if sorted_indices.size > 0:
-            idx = sorted_indices[0]  # Index of highest-confidence person
+            idx = sorted_indices[0]
             kp = keypoints.xy[idx].tolist()
             kp_conf = keypoints.conf[idx].tolist()
             current_keypoints.append(kp)
             print(f"Stream {stream_id}: Processing person with confidence {boxes.conf[idx]:.2f}")
-
-            # Detect communication and looking: head orientation (using nose, ears/eyes, shoulders)
-            if len(kp) >= 17:  # Standard 17-keypoint format
-                nose = kp[0]  # Nose keypoint
+            if len(kp) >= 17:
+                nose = kp[0]
                 left_ear = kp[3]
                 right_ear = kp[4]
-                left_eye = kp[1]  # Left eye as fallback
-                right_eye = kp[2]  # Right eye as fallback
+                left_eye = kp[1]
+                right_eye = kp[2]
                 left_shoulder = kp[5]
                 right_shoulder = kp[6]
-                # Check for missing keypoints to infer head turn
                 missing_ear = (kp_conf[3] < 0.3 or left_ear[0] == 0) or (kp_conf[4] < 0.3 or right_ear[0] == 0)
                 one_ear_missing = (kp_conf[3] < 0.3 or left_ear[0] == 0) != (kp_conf[4] < 0.3 or right_ear[0] == 0)
-                # Use ears if confident, else fallback to eyes
                 use_eyes = False
                 if missing_ear:
                     use_eyes = True
@@ -118,32 +216,26 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                     right_point = right_ear
                     left_conf = kp_conf[3]
                     right_conf = kp_conf[4]
-                # Check keypoint confidence and presence for angle calculation
                 if (nose[0] != 0 and left_point[0] != 0 and right_point[0] != 0 and
                     left_shoulder[0] != 0 and right_shoulder[0] != 0 and
                     kp_conf[0] >= 0.3 and left_conf >= 0.3 and right_conf >= 0.3 and
                     kp_conf[5] >= 0.3 and kp_conf[6] >= 0.3):
-                    # Calculate head angle relative to ears or eyes
                     head_angle = np.arctan2(right_point[1] - left_point[1], right_point[0] - left_point[0]) * 180 / np.pi
-                    # Calculate shoulder angle for body orientation
                     shoulder_angle = np.arctan2(right_shoulder[1] - left_shoulder[1], right_shoulder[0] - left_shoulder[0]) * 180 / np.pi
-                    # Normalize relative angle
                     relative_angle = abs((head_angle - shoulder_angle + 180) % 360 - 180)
                     current_head_angles.append(relative_angle)
                     print(f"Stream {stream_id}: Head angle: {head_angle:.2f}, Shoulder angle: {shoulder_angle:.2f}, Relative angle: {relative_angle:.2f}, Using eyes: {use_eyes}")
-                    # Detect looking at another's answers (left/right head turn)
                     direction = "left" if head_angle > shoulder_angle else "right"
-                    if relative_angle > 45 or (one_ear_missing and missing_ear):  # Angle or missing keypoint
-                        if relative_angle > 55 or (one_ear_missing and missing_ear):  # Stronger turn or missing keypoint
+                    if relative_angle > 45 or (one_ear_missing and missing_ear):
+                        if relative_angle > 55 or (one_ear_missing and missing_ear):
                             incidents.append(f"looking_at_answers_{direction}")
                             print(f"Stream {stream_id}: Suspected looking at another's answers ({direction})")
                         else:
                             incidents.append("communication_suspected")
                             print(f"Stream {stream_id}: Communication suspected")
                     else:
-                        print(f"Stream {stream_id}: No significant head turn detected")
+                        print(f"Stream_id {stream_id}: No significant head turn detected")
                 else:
-                    # Infer looking from missing keypoints if one ear is missing
                     if one_ear_missing:
                         direction = "right" if kp_conf[3] < 0.3 or left_ear[0] == 0 else "left"
                         incidents.append(f"looking_at_answers_{direction}")
@@ -159,60 +251,46 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
             print(f"Stream {stream_id}: No person detected in pose results")
     else:
         print(f"Stream {stream_id}: No pose detections")
-
-    # Detect paper passing: hand movement tracking
     if prev_keypoints and len(prev_keypoints) == len(current_keypoints):
         for prev_kp, curr_kp in zip(prev_keypoints, current_keypoints):
-            left_hand = curr_kp[9]  # Left hand keypoint
-            right_hand = curr_kp[10]  # Right hand keypoint
+            left_hand = curr_kp[9]
+            right_hand = curr_kp[10]
             prev_left = prev_kp[9]
             prev_right = prev_kp[10]
             if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.3:
                 left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
-                if left_dist > 50:  # Significant hand movement
+                if left_dist > 50:
                     incidents.append("paper_passing_suspected")
             if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.3:
                 right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
                 if right_dist > 50:
                     incidents.append("paper_passing_suspected")
-
     print(f"Stream {stream_id}: Pose incidents: {incidents}, Head angles: {current_head_angles}")
     return incidents, current_keypoints, current_head_angles
 
 @app.post("/detect")
-async def detect_cheating(data: MultiStreamData):
-    db = SessionLocal()
+async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
     results = []
-    wat_tz = pytz.timezone('Africa/Lagos')  # WAT is UTC+1
-    prev_keypoints_map = {}  # Store keypoints for each stream
-    prev_head_angles_map = {}  # Store head angles for each stream
-
+    wat_tz = pytz.timezone('Africa/Lagos')
+    prev_keypoints_map = {}
+    prev_head_angles_map = {}
     try:
         for stream in data.streams:
             if not stream.stream_id:
                 raise HTTPException(status_code=422, detail="stream_id is missing in stream data")
-            # Validate and decode base64 image
             if not stream.image or not stream.image.startswith('data:image/jpeg;base64,'):
                 raise HTTPException(status_code=422, detail=f"Invalid image data for stream {stream.stream_id}")
-
             try:
                 img_data = base64.b64decode(stream.image.split(',')[1])
             except Exception as e:
                 raise HTTPException(status_code=422, detail=f"Failed to decode image for stream {stream.stream_id}: {str(e)}")
-
             nparr = np.frombuffer(img_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
                 raise HTTPException(status_code=422, detail=f"Invalid image format for stream {stream.stream_id}")
-
-            # Resize image for faster processing
-            img_resized = cv2.resize(img, (192, 192), interpolation=cv2.INTER_AREA)  # Reduced resolution
+            img_resized = cv2.resize(img, (192, 192), interpolation=cv2.INTER_AREA)
             rgb_img = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-
-            # Object detection
             detected_objects, all_objects = await process_yolo(rgb_img, stream.stream_id)
-
-            # Pose estimation for communication and paper passing
             pose_incidents, current_keypoints, current_head_angles = await process_pose(
                 rgb_img, stream.stream_id, 
                 prev_keypoints_map.get(stream.stream_id), 
@@ -220,23 +298,17 @@ async def detect_cheating(data: MultiStreamData):
             )
             prev_keypoints_map[stream.stream_id] = current_keypoints
             prev_head_angles_map[stream.stream_id] = current_head_angles
-
-            # Determine primary incident
             primary_incident = "Normal"
             if detected_objects:
                 primary_incident = f"Objects Detected: {', '.join([obj['label'] for obj in detected_objects])}"
             elif pose_incidents:
                 primary_incident = f"Pose Incidents: {', '.join(pose_incidents)}"
-
             print(f"Stream {stream.stream_id}: Status: {'suspicious' if detected_objects or pose_incidents else 'normal'}, "
                   f"Objects: {[obj['label'] for obj in detected_objects]}, Pose: {pose_incidents}, Primary: {primary_incident}")
-
-            # Log suspicious activities
             incidents = []
             if detected_objects:
                 incidents.append(f"objects_detected: {', '.join([obj['label'] for obj in detected_objects])}")
             incidents.extend(pose_incidents)
-
             for incident_type in incidents:
                 incident = CheatingIncident(
                     user_id=stream.user_id,
@@ -246,7 +318,6 @@ async def detect_cheating(data: MultiStreamData):
                     timestamp=datetime.datetime.now(wat_tz)
                 )
                 db.add(incident)
-
             results.append({
                 "stream_id": stream.stream_id,
                 "status": "suspicious" if incidents else "normal",
@@ -254,26 +325,24 @@ async def detect_cheating(data: MultiStreamData):
                 "pose_incidents": pose_incidents,
                 "primary_incident": primary_incident
             })
-
         db.commit()
         return results
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-    finally:
-        db.close()
 
 @app.get("/incidents/{exam_id}")
-async def get_incidents(exam_id: str):
-    db = SessionLocal()
-    try:
-        incidents = db.query(CheatingIncident).filter(CheatingIncident.exam_id == exam_id).all()
-        return [{
-            "id": inc.id,
-            "user_id": inc.user_id,
-            "stream_id": inc.stream_id,
-            "incident_type": inc.incident_type,
-            "timestamp": inc.timestamp.isoformat()
-        } for inc in incidents]
-    finally:
-        db.close()
+async def get_incidents(exam_id: str, db: Session = Depends(get_db)):
+    incidents = db.query(CheatingIncident).filter(CheatingIncident.exam_id == exam_id).all()
+    return [{
+        "id": inc.id,
+        "user_id": inc.user_id,
+        "stream_id": inc.stream_id,
+        "incident_type": inc.incident_type,
+        "timestamp": inc.timestamp.isoformat()
+    } for inc in incidents]
+
+from database import Base, engine
+from models import User, CheatingIncident, SessionModel
+
+# Create all tables
+Base.metadata.create_all(bind=engine)
