@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Form
+from fastapi import FastAPI, HTTPException, Depends, Request, status, Form, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -16,6 +16,8 @@ import os
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 import pytz
+import pandas as pd
+import io
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -23,7 +25,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Load YOLOv8n model for object detection and pose estimation
+# Load YOLO models
 try:
     yolo_model = YOLO('yolov8n.pt')
     print("Object detection model loaded successfully")
@@ -39,7 +41,7 @@ try:
 except Exception as e:
     raise Exception(f"Failed to load yolov8n-pose.pt: {str(e)}")
 
-# Dependency to get DB session
+# Database dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -47,7 +49,7 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic model for stream data
+# Pydantic models
 class StreamData(BaseModel):
     image: str
     user_id: str
@@ -57,10 +59,12 @@ class StreamData(BaseModel):
 class MultiStreamData(BaseModel):
     streams: List[StreamData]
 
-# Get current user from session ID in query parameter
-async def get_current_user(session_id: str = None, db: Session = Depends(get_db)):
-    print(f"get_current_user: Retrieved session_id: {session_id}")
+# Get current user from session ID
+async def get_current_user(request: Request, db: Session = Depends(get_db)):
+    session_id = request.query_params.get('session_id')
+    print(f"get_current_user: Retrieved session_id: '{session_id}'")
     if not session_id:
+        print("get_current_user: No session_id provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated - no session ID provided",
@@ -69,6 +73,7 @@ async def get_current_user(session_id: str = None, db: Session = Depends(get_db)
     session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
     print(f"get_current_user: Database query for session_id '{session_id}' returned: {session}")
     if session is None or session.expires_at < datetime.datetime.now():
+        print(f"get_current_user: Invalid or expired session for session_id '{session_id}'")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
@@ -77,6 +82,7 @@ async def get_current_user(session_id: str = None, db: Session = Depends(get_db)
     user = db.query(User).filter(User.id == session.user_id).first()
     print(f"get_current_user: Database query for user_id '{session.user_id}' returned: {user}")
     if user is None:
+        print(f"get_current_user: User not found for session_id '{session_id}'")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found for session",
@@ -84,9 +90,10 @@ async def get_current_user(session_id: str = None, db: Session = Depends(get_db)
         )
     return user
 
-# User signup route (handles form data, redirects to /)
+# Signup route
 @app.post("/signup", response_class=HTMLResponse)
 async def signup(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    print(f"Signup: Attempting signup for username '{username}'")
     db_user = db.query(User).filter(User.username == username).first()
     if db_user:
         print(f"Signup: Username '{username}' already exists")
@@ -103,7 +110,7 @@ async def signup(username: str = Form(...), password: str = Form(...), db: Sessi
         content='<script>alert("Account created! Please log in."); window.location="/";</script>'
     )
 
-# User login route (handles form data, creates session, redirects to /dashboard)
+# Login route
 @app.post("/login", response_class=HTMLResponse)
 async def login(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     print(f"Login: Attempting login for username '{username}'")
@@ -113,7 +120,6 @@ async def login(username: str = Form(...), password: str = Form(...), db: Sessio
         return HTMLResponse(
             content='<script>alert("Invalid username or password"); window.location="/";</script>'
         )
-    # Create a session
     session_id = str(uuid.uuid4())
     expires_at = datetime.datetime.now() + datetime.timedelta(minutes=30)
     new_session = SessionModel(
@@ -126,10 +132,10 @@ async def login(username: str = Form(...), password: str = Form(...), db: Sessio
     print(f"Login: Created session '{session_id}' for user '{username}'")
     return RedirectResponse(url=f"/dashboard?session_id={session_id}", status_code=status.HTTP_303_SEE_OTHER)
 
-# User logout route
+# Logout route
 @app.get("/logout")
 async def logout(session_id: str = None, db: Session = Depends(get_db)):
-    print(f"Logout: Received session_id: {session_id}")
+    print(f"Logout: Received session_id: '{session_id}'")
     if session_id:
         session = db.query(SessionModel).filter(SessionModel.session_id == session_id).first()
         if session:
@@ -138,25 +144,22 @@ async def logout(session_id: str = None, db: Session = Depends(get_db)):
             print(f"Logout: Deleted session '{session_id}'")
     return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
-# Dashboard route (protected)
+# Dashboard route
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(current_user: User = Depends(get_current_user), session_id: str = None):
     print(f"Dashboard: Accessed by user '{current_user.username}' with session_id '{session_id}'")
     with open("static/dashboard.html", "r") as f:
         content = f.read()
-    # Pass session_id to dashboard.html for further navigation
-    content = content.replace(
-        '<a href="/logout?session_id={session_id}">Log out</a>',
-        f'<a href="/logout?session_id={session_id}">Log out</a>'
-    )
+    content = content.replace('{session_id}', session_id or '')
     return HTMLResponse(content=content)
 
-# Root route (serves index.html)
+# Root route
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
+# YOLO processing functions
 async def process_yolo(rgb_img, stream_id):
     yolo_results = await asyncio.get_event_loop().run_in_executor(
         None, lambda: yolo_model(rgb_img, conf=0.3, classes=[0, 67, 73, 75], device='cpu')
@@ -184,16 +187,17 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
     incidents = []
     current_keypoints = []
     current_head_angles = []
+    person_hands = []
     if pose_results and pose_results[0].boxes and pose_results[0].keypoints:
         boxes = pose_results[0].boxes
         keypoints = pose_results[0].keypoints
-        sorted_indices = np.argsort(-boxes.conf.cpu().numpy())
-        if sorted_indices.size > 0:
-            idx = sorted_indices[0]
+        for idx in range(len(boxes)):
+            if boxes.conf[idx] < 0.3:
+                continue
             kp = keypoints.xy[idx].tolist()
             kp_conf = keypoints.conf[idx].tolist()
             current_keypoints.append(kp)
-            print(f"Stream {stream_id}: Processing person with confidence {boxes.conf[idx]:.2f}")
+            print(f"Stream {stream_id}: Processing person {idx} with confidence {boxes.conf[idx]:.2f}")
             if len(kp) >= 17:
                 nose = kp[0]
                 left_ear = kp[3]
@@ -245,29 +249,52 @@ async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles
                               f"Nose conf={kp_conf[0]:.2f}, Left {'eye' if use_eyes else 'ear'} conf={left_conf:.2f}, "
                               f"Right {'eye' if use_eyes else 'ear'} conf={right_conf:.2f}, "
                               f"Left shoulder conf={kp_conf[5]:.2f}, Right shoulder conf={kp_conf[6]:.2f}")
+                # Collect hands
+                left_hand = kp[9] if kp_conf[9] >= 0.3 else None
+                right_hand = kp[10] if kp_conf[10] >= 0.3 else None
+                person_hands.append({'left': left_hand, 'right': right_hand})
             else:
-                print(f"Stream {stream_id}: No valid keypoints for primary person")
-        else:
-            print(f"Stream {stream_id}: No person detected in pose results")
+                print(f"Stream {stream_id}: No valid keypoints for person {idx}")
+        # Check closeness between hands of different persons
+        for p1 in range(len(person_hands)):
+            for p2 in range(p1 + 1, len(person_hands)):
+                hands1 = [h for h in [person_hands[p1]['left'], person_hands[p1]['right']] if h]
+                hands2 = [h for h in [person_hands[p2]['left'], person_hands[p2]['right']] if h]
+                for h1 in hands1:
+                    for h2 in hands2:
+                        dist = np.sqrt((h1[0] - h2[0])**2 + (h1[1] - h2[1])**2)
+                        if dist < 50:
+                            incidents.append("paper_passing_suspected")
+                            print(f"Stream {stream_id}: Paper passing suspected between persons {p1} and {p2}, dist {dist:.2f}")
+        # Sort keypoints by nose x for matching across frames
+        if current_keypoints:
+            current_keypoints.sort(key=lambda kp: kp[0][0] if len(kp) > 0 else 0)
+        if prev_keypoints:
+            prev_keypoints.sort(key=lambda kp: kp[0][0] if len(kp) > 0 else 0)
+        # Individual hand movement check
+        if prev_keypoints and len(prev_keypoints) == len(current_keypoints):
+            for p in range(len(current_keypoints)):
+                prev_kp = prev_keypoints[p]
+                curr_kp = current_keypoints[p]
+                kp_conf = keypoints.conf[p].tolist() if 'conf' in keypoints.data else [0.0] * 17
+                left_hand = curr_kp[9]
+                right_hand = curr_kp[10]
+                prev_left = prev_kp[9]
+                prev_right = prev_kp[10]
+                if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.3:
+                    left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
+                    if left_dist > 50:
+                        incidents.append("paper_passing_suspected")
+                if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.3:
+                    right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
+                    if right_dist > 50:
+                        incidents.append("paper_passing_suspected")
     else:
         print(f"Stream {stream_id}: No pose detections")
-    if prev_keypoints and len(prev_keypoints) == len(current_keypoints):
-        for prev_kp, curr_kp in zip(prev_keypoints, current_keypoints):
-            left_hand = curr_kp[9]
-            right_hand = curr_kp[10]
-            prev_left = prev_kp[9]
-            prev_right = prev_kp[10]
-            if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.3:
-                left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
-                if left_dist > 50:
-                    incidents.append("paper_passing_suspected")
-            if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.3:
-                right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
-                if right_dist > 50:
-                    incidents.append("paper_passing_suspected")
     print(f"Stream {stream_id}: Pose incidents: {incidents}, Head angles: {current_head_angles}")
     return incidents, current_keypoints, current_head_angles
 
+# Detect cheating endpoint
 @app.post("/detect")
 async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
     results = []
@@ -330,6 +357,7 @@ async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+# Get incidents endpoint
 @app.get("/incidents/{exam_id}")
 async def get_incidents(exam_id: str, db: Session = Depends(get_db)):
     incidents = db.query(CheatingIncident).filter(CheatingIncident.exam_id == exam_id).all()
@@ -341,8 +369,109 @@ async def get_incidents(exam_id: str, db: Session = Depends(get_db)):
         "timestamp": inc.timestamp.isoformat()
     } for inc in incidents]
 
+# Generate seating endpoint
+@app.post("/generate_seating")
+async def generate_seating(
+    file: UploadFile = File(...),
+    rows: int = Form(...),
+    cols: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    print(f"generate_seating: User '{current_user.username}' attempting to generate seating")
+    try:
+        content = await file.read()
+        print(f"generate_seating: Received file with size {len(content)} bytes")
+        df = pd.read_csv(io.BytesIO(content))
+        print(f"generate_seating: CSV columns: {df.columns.tolist()}")
+        required_columns = ['student_id', 'name', 'course', 'grade', 'times_cheated']
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError(f"CSV must contain columns: {', '.join(required_columns)}")
+        
+        df['grade'] = pd.to_numeric(df['grade'], errors='coerce')
+        df['times_cheated'] = pd.to_numeric(df['times_cheated'], errors='coerce')
+        df['risk'] = df['times_cheated'] * 10 + (100 - df['grade']) / 10
+        df = df.sort_values('risk', ascending=False)
+        students = df.to_dict(orient='records')
+        print(f"generate_seating: Processed {len(students)} students")
+        
+        grid = [[None for _ in range(cols)] for _ in range(rows)]
+        
+        directions_full = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
+        directions_adj = [(-1,0),(1,0),(0,-1),(0,1)]
+        
+        def get_neighbors(i, j, directions):
+            nei = []
+            for di, dj in directions:
+                ni, nj = i + di, j + dj
+                if 0 <= ni < rows and 0 <= nj < cols and grid[ni][nj]:
+                    nei.append(grid[ni][nj]['course'])
+            return nei
+        
+        unplaced = []
+        for stu in students:
+            placed = False
+            for i in range(rows):
+                for j in range(cols):
+                    if grid[i][j] is None:
+                        neighbors = get_neighbors(i, j, directions_full)
+                        if stu['course'] not in neighbors:
+                            grid[i][j] = {
+                                'student_id': stu['student_id'],
+                                'name': stu['name'],
+                                'course': stu['course'],
+                                'grade': stu['grade'],
+                                'times_cheated': stu['times_cheated']
+                            }
+                            placed = True
+                            break
+                if placed:
+                    break
+            if not placed:
+                unplaced.append(stu)
+        
+        unplaced2 = []
+        for stu in unplaced:
+            placed = False
+            for i in range(rows):
+                for j in range(cols):
+                    if grid[i][j] is None:
+                        neighbors = get_neighbors(i, j, directions_adj)
+                        if stu['course'] not in neighbors:
+                            grid[i][j] = {
+                                'student_id': stu['student_id'],
+                                'name': stu['name'],
+                                'course': stu['course'],
+                                'grade': stu['grade'],
+                                'times_cheated': stu['times_cheated']
+                            }
+                            placed = True
+                            break
+                if placed:
+                    break
+            if not placed:
+                unplaced2.append(stu)
+        
+        for stu in unplaced2:
+            for i in range(rows):
+                for j in range(cols):
+                    if grid[i][j] is None:
+                        grid[i][j] = {
+                            'student_id': stu['student_id'],
+                            'name': stu['name'],
+                            'course': stu['course'],
+                            'grade': stu['grade'],
+                            'times_cheated': stu['times_cheated']
+                        }
+                        break
+        
+        print(f"generate_seating: Seating arrangement generated successfully")
+        return {'seating': grid}
+    except Exception as e:
+        print(f"generate_seating: Error - {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error generating seating: {str(e)}")
+
 from database import Base, engine
 from models import User, CheatingIncident, SessionModel
 
-# Create all tables
 Base.metadata.create_all(bind=engine)

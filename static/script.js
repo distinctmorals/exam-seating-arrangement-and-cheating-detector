@@ -5,11 +5,32 @@ const statusIcon = document.getElementById('statusIcon');
 const incidentList = document.getElementById('incident-list');
 const toggleIncidents = document.getElementById('toggleIncidents');
 const cameraSelect = document.getElementById('cameraSelect');
+const seatingForm = document.getElementById('seatingForm');
+const seatingResult = document.getElementById('seatingResult');
+const sessionIdInput = document.getElementById('sessionId');
+const logoutLink = document.getElementById('logoutLink');
+const proctoringSection = document.getElementById('proctoringSection');
 
 const examId = 'exam_' + Math.random().toString(36).substr(2, 9);
 const streams = [
     { userId: 'user_1', streamId: 'stream_1' }
 ];
+
+// Retrieve session_id from URL or localStorage
+const urlParams = new URLSearchParams(window.location.search);
+let sessionId = urlParams.get('session_id') || localStorage.getItem('session_id');
+console.log('Client: Retrieved session_id:', sessionId);
+
+// Store session_id in localStorage if present
+if (sessionId) {
+    localStorage.setItem('session_id', sessionId);
+    sessionIdInput.value = sessionId;
+    logoutLink.href = `/logout?session_id=${encodeURIComponent(sessionId)}`;
+} else {
+    console.warn('Client: No session_id found in URL or localStorage');
+    seatingResult.innerHTML = `<p class="text-red-600">Error: No session ID. Please log in again.</p>`;
+    setTimeout(() => { window.location.href = '/'; }, 2000);
+}
 
 async function getVideoDevices() {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -97,7 +118,7 @@ async function setupCamera(streamId, deviceId = null) {
         }
         
         const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { deviceId: { exact: deviceId }, width: 192, height: 192 }, // Reduced resolution
+            video: { deviceId: { exact: deviceId }, width: 192, height: 192 },
             audio: false
         });
         video.srcObject = stream;
@@ -137,7 +158,7 @@ async function detectFaces() {
         }
         
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = canvas.toDataURL('image/jpeg', 0.7); // Reduced quality for speed
+        const imageData = canvas.toDataURL('image/jpeg', 0.7);
         
         if (!imageData.startsWith('data:image/jpeg;base64,')) {
             console.error(`Invalid image data for stream ${stream.streamId}`);
@@ -175,10 +196,10 @@ async function detectFaces() {
             if (result.status === 'suspicious') {
                 hasSuspicious = true;
                 streamStatus.textContent = result.primary_incident;
-                streamStatus.style.backgroundColor = '#dc2626'; // Red for suspicious
+                streamStatus.style.backgroundColor = '#dc2626';
             } else {
                 streamStatus.textContent = 'Normal';
-                streamStatus.style.backgroundColor = '#16a34a'; // Green for normal
+                streamStatus.style.backgroundColor = '#16a34a';
             }
             const li = document.createElement('li');
             li.textContent = `Stream ${result.stream_id}: ${result.primary_incident} at ${new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' })}`;
@@ -227,16 +248,89 @@ toggleIncidents.addEventListener('click', () => {
     toggleIncidents.textContent = incidentList.classList.contains('hidden') ? 'Show' : 'Hide';
 });
 
+seatingForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!sessionId) {
+        console.error('Client: No session_id available. Redirecting to login.');
+        seatingResult.innerHTML = `<p class="text-red-600">Error: No session ID. Please log in again.</p>`;
+        window.location.href = '/';
+        return;
+    }
+    console.log('Client: Submitting seating form with session_id:', sessionId);
+    const formData = new FormData(seatingForm);
+    try {
+        const response = await fetch(`/generate_seating?session_id=${encodeURIComponent(sessionId)}`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`HTTP error ${response.status}: ${errorData.detail || 'Unknown error'}`);
+        }
+        const data = await response.json();
+        console.log('Client: Seating arrangement received:', data);
+        displaySeating(data.seating);
+        // Start proctoring after seating is generated
+        proctoringSection.style.display = 'block';
+        init();
+    } catch (error) {
+        console.error('Client: Error generating seating:', error);
+        seatingResult.innerHTML = `<p class="text-red-600">Error: ${error.message}</p>`;
+    }
+});
+
+const courseColors = {};
+
+function getColor(course) {
+    if (!courseColors[course]) {
+        let hash = 0;
+        for (let i = 0; i < course.length; i++) {
+            hash = course.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const r = (hash & 0xFF);
+        const g = ((hash >> 8) & 0xFF);
+        const b = ((hash >> 16) & 0xFF);
+        courseColors[course] = `rgb(${r}, ${g}, ${b})`;
+    }
+    return courseColors[course];
+}
+
+function displaySeating(seating) {
+    let html = '<table class="w-full border-collapse border border-gray-300">';
+    seating.forEach(row => {
+        html += '<tr>';
+        row.forEach(cell => {
+            const bgColor = cell ? getColor(cell.course) : 'white';
+            html += `<td class="border border-gray-300 p-2" style="background-color: ${bgColor};">`;
+            if (cell) {
+                html += `${cell.name} (${cell.course})`;
+            } else {
+                html += '&nbsp;';
+            }
+            html += '</td>';
+        });
+        html += '</tr>';
+    });
+    html += '</table>';
+    seatingResult.innerHTML = html;
+}
+
 async function init() {
+    if (!sessionId) {
+        console.error('Client: No session_id found. Redirecting to login.');
+        window.location.href = '/';
+        return;
+    }
+    console.log('Client: Initializing with session_id:', sessionId);
     const devices = await getVideoDevices();
-    console.log('Available video devices:', devices);
+    console.log('Client: Available video devices:', devices);
     await populateCameraSelect();
     
     for (const stream of streams) {
         await setupCamera(stream.streamId);
     }
-    setInterval(detectFaces, 2000); // Increased frequency for faster detection
+    setInterval(detectFaces, 2000);
     setInterval(loadIncidents, 5000);
 }
 
-init();
+// Do not call init() here; it will be called after seating generation
