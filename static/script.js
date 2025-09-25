@@ -195,14 +195,14 @@ async function detectFaces() {
             console.log(`Stream ${result.stream_id}: Status: ${result.status}, Primary: ${result.primary_incident}`);
             if (result.status === 'suspicious') {
                 hasSuspicious = true;
-                streamStatus.textContent = result.primary_incident;
+                streamStatus.textContent = formatIncident(result.primary_incident);
                 streamStatus.style.backgroundColor = '#dc2626';
             } else {
                 streamStatus.textContent = 'Normal';
                 streamStatus.style.backgroundColor = '#16a34a';
             }
             const li = document.createElement('li');
-            li.textContent = `Stream ${result.stream_id}: ${result.primary_incident} at ${new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' })}`;
+            li.textContent = `Stream ${result.stream_id}: ${formatIncident(result.primary_incident)} at ${new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' })}`;
             incidentList.prepend(li);
         });
         
@@ -217,6 +217,30 @@ async function detectFaces() {
     }
 }
 
+// Function to format incident types into readable text
+function formatIncident(incident) {
+    if (incident === 'Normal') {
+        return 'No issues detected';
+    } else if (incident.startsWith('objects_detected:')) {
+        const objects = incident.replace('objects_detected: ', '').split(', ').map(obj => {
+            return obj === 'cell phone' ? 'Phone' : obj.charAt(0).toUpperCase() + obj.slice(1);
+        }).join(', ');
+        return `${objects} detected`;
+    } else if (incident.startsWith('looking_at_answers_')) {
+        const direction = incident.includes('left') ? 'left' : 'right';
+        return `Student is looking ${direction} at answers`;
+    } else if (incident === 'communication_suspected') {
+        return 'Communication between students suspected';
+    } else if (incident === 'looking_down_suspected') {
+        return 'Student is looking down suspiciously';
+    } else if (incident === 'potential_paper_usage') {
+        return 'Potential use of unauthorized paper detected';
+    } else if (incident === 'paper_passing_suspected') {
+        return 'Paper passing between students suspected';
+    }
+    return incident; // Fallback for unhandled incident types
+}
+
 async function loadIncidents() {
     try {
         const response = await fetch(`/incidents/${examId}`);
@@ -227,7 +251,7 @@ async function loadIncidents() {
         incidentList.innerHTML = '';
         incidents.forEach(incident => {
             const li = document.createElement('li');
-            li.textContent = `Stream ${incident.stream_id}: ${incident.incident_type} at ${new Date(incident.timestamp).toLocaleString('en-US', { timeZone: 'Africa/Lagos' })}`;
+            li.textContent = `Stream ${incident.stream_id}: ${formatIncident(incident.incident_type)} at ${new Date(incident.timestamp).toLocaleString('en-US', { timeZone: 'Africa/Lagos' })}`;
             incidentList.appendChild(li);
         });
     } catch (error) {
@@ -332,5 +356,3 @@ async function init() {
     setInterval(detectFaces, 1000);
     setInterval(loadIncidents, 5000);
 }
-
-// Do not call init() here; it will be called after seating generation

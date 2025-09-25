@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, status, Form, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict
 import datetime
 import uuid
 from database import SessionLocal
@@ -18,12 +18,19 @@ from sqlalchemy.orm import Session
 import pytz
 import pandas as pd
 import io
+import torch
+import threading
+from collections import deque
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Determine device
+device = '0' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
 
 # Load YOLO models
 try:
@@ -111,14 +118,15 @@ async def signup(username: str = Form(...), password: str = Form(...), db: Sessi
     )
 
 # Login route
-@app.post("/login", response_class=HTMLResponse)
+@app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     print(f"Login: Attempting login for username '{username}'")
     db_user = db.query(User).filter(User.username == username).first()
     if not db_user or not pwd_context.verify(password, db_user.password):
         print(f"Login: Invalid credentials for username '{username}'")
         return HTMLResponse(
-            content='<script>alert("Invalid username or password"); window.location="/";</script>'
+            content='<script>alert("Invalid username or password"); window.location="/";</script>',
+            status_code=status.HTTP_200_OK
         )
     session_id = str(uuid.uuid4())
     expires_at = datetime.datetime.now() + datetime.timedelta(minutes=30)
@@ -159,177 +167,308 @@ async def get_index():
     with open("static/index.html", "r") as f:
         return HTMLResponse(content=f.read())
 
-# YOLO processing functions
-async def process_yolo(rgb_img, stream_id):
-    yolo_results = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: yolo_model(rgb_img, conf=0.3, classes=[0, 67, 73, 75], device='cpu')
-    )
-    detected_objects = []
-    all_objects = []
-    for r in yolo_results:
-        for box in r.boxes:
-            cls = int(box.cls[0])
-            label = yolo_model.names[cls]
-            conf = float(box.conf)
-            xyxy = box.xyxy[0].tolist()
-            all_objects.append(f"{label} (conf={conf:.2f}, box={xyxy})")
-            if label in ['cell phone', 'book', 'paper']:
-                detected_objects.append({'label': label, 'box': xyxy})
-    print(f"Stream {stream_id}: All detected objects: {all_objects}")
-    return detected_objects, all_objects
+# Thread-local storage for per-stream state
+_thread_locals = threading.local()
 
-async def process_pose(rgb_img, stream_id, prev_keypoints=None, prev_head_angles=None, prev_looking_down_timestamps=None):
-    if not stream_id:
-        raise ValueError("stream_id is not defined")
-    pose_results = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: pose_model(rgb_img, conf=0.3, device='cpu')
+def get_prev_keypoints_map():
+    if not hasattr(_thread_locals, 'prev_keypoints_map'):
+        _thread_locals.prev_keypoints_map = {}
+    return _thread_locals.prev_keypoints_map
+
+def get_prev_head_angles_map():
+    if not hasattr(_thread_locals, 'prev_head_angles_map'):
+        _thread_locals.prev_head_angles_map = {}
+    return _thread_locals.prev_head_angles_map
+
+def get_prev_looking_down_start_map():
+    if not hasattr(_thread_locals, 'prev_looking_down_start_map'):
+        _thread_locals.prev_looking_down_start_map = {}
+    return _thread_locals.prev_looking_down_start_map
+
+def get_frame_count_map():
+    if not hasattr(_thread_locals, 'frame_count_map'):
+        _thread_locals.frame_count_map = {}
+    return _thread_locals.frame_count_map
+
+def get_prev_phone_detections_map():
+    if not hasattr(_thread_locals, 'prev_phone_detections_map'):
+        _thread_locals.prev_phone_detections_map = {}
+    return _thread_locals.prev_phone_detections_map
+
+def get_hand_movement_history_map():
+    if not hasattr(_thread_locals, 'hand_movement_history_map'):
+        _thread_locals.hand_movement_history_map = {}
+    return _thread_locals.hand_movement_history_map
+
+# Image preprocessing for better phone detection
+def preprocess_image(img):
+    # Convert to grayscale and apply CLAHE for contrast enhancement
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    # Convert back to RGB
+    enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
+    return enhanced_rgb
+
+# Calculate IoU for temporal consistency
+def calculate_iou(box1, box2):
+    x1, y1, x2, y2 = box1
+    x1_p, y1_p, x2_p, y2_p = box2
+    xi1 = max(x1, x1_p)
+    yi1 = max(y1, y1_p)
+    xi2 = min(x2, x2_p)
+    yi2 = min(y2, y2_p)
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    box1_area = (x2 - x1) * (y2 - y1)
+    box2_area = (x2_p - x1_p) * (y2_p - y1_p)
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / union_area if union_area != 0 else 0
+
+# YOLO processing functions
+async def batch_process_yolo(imgs, stream_ids):
+    # Dynamic confidence threshold for cell phones
+    base_conf = 0.1
+    phone_conf = 0.05
+    processed_imgs = [preprocess_image(img) for img in imgs]
+    yolo_results = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: yolo_model(processed_imgs, conf=base_conf, classes=[0, 67, 73, 75], device=device, imgsz=416)
     )
-    incidents = []
-    current_keypoints = []
-    current_head_angles = []
-    person_hands = []
-    current_looking_down_timestamps = []
-    current_time = datetime.datetime.now(pytz.UTC).timestamp()
-    if pose_results and pose_results[0].boxes and pose_results[0].keypoints:
-        boxes = pose_results[0].boxes
-        keypoints = pose_results[0].keypoints
-        for idx in range(len(boxes)):
-            if boxes.conf[idx] < 0.3:
+    outputs = []
+    prev_phone_detections = get_prev_phone_detections_map()
+    for r, sid in zip(yolo_results, stream_ids):
+        detected_objects = []
+        all_objects = []
+        phone_detected = False
+        frame_phone_detections = []
+        for box in r.boxes:
+            if not box.cls:  # Handle empty cls
+                print(f"Stream {sid}: Empty cls detected, skipping box")
                 continue
-            kp = keypoints.xy[idx].tolist()
-            kp_conf = keypoints.conf[idx].tolist()
-            current_keypoints.append(kp)
-            print(f"Stream {stream_id}: Processing person {idx} with confidence {boxes.conf[idx]:.2f}")
-            if len(kp) >= 17:
-                nose = kp[0]
-                left_ear = kp[3]
-                right_ear = kp[4]
-                left_eye = kp[1]
-                right_eye = kp[2]
-                left_shoulder = kp[5]
-                right_shoulder = kp[6]
-                missing_ear = (kp_conf[3] < 0.3 or left_ear[0] == 0) or (kp_conf[4] < 0.3 or right_ear[0] == 0)
-                one_ear_missing = (kp_conf[3] < 0.3 or left_ear[0] == 0) != (kp_conf[4] < 0.3 or right_ear[0] == 0)
-                use_eyes = False
-                if missing_ear:
-                    use_eyes = True
-                    left_point = left_eye
-                    right_point = right_eye
-                    left_conf = kp_conf[1]
-                    right_conf = kp_conf[2]
-                else:
-                    left_point = left_ear
-                    right_point = right_ear
-                    left_conf = kp_conf[3]
-                    right_conf = kp_conf[4]
-                if (nose[0] != 0 and left_point[0] != 0 and right_point[0] != 0 and
-                    left_shoulder[0] != 0 and right_shoulder[0] != 0 and
-                    kp_conf[0] >= 0.3 and left_conf >= 0.3 and right_conf >= 0.3 and
-                    kp_conf[5] >= 0.3 and kp_conf[6] >= 0.3):
-                    head_angle = np.arctan2(right_point[1] - left_point[1], right_point[0] - left_point[0]) * 180 / np.pi
-                    shoulder_angle = np.arctan2(right_shoulder[1] - left_shoulder[1], right_shoulder[0] - left_shoulder[0]) * 180 / np.pi
-                    relative_angle = abs((head_angle - shoulder_angle + 180) % 360 - 180)
-                    current_head_angles.append(relative_angle)
-                    print(f"Stream {stream_id}: Head angle: {head_angle:.2f}, Shoulder angle: {shoulder_angle:.2f}, Relative angle: {relative_angle:.2f}, Using eyes: {use_eyes}")
-                    direction = "left" if head_angle > shoulder_angle else "right"
-                    if relative_angle > 30 or (one_ear_missing and missing_ear):
-                        if relative_angle > 40 or (one_ear_missing and missing_ear):
-                            incidents.append(f"looking_at_answers_{direction}")
-                            print(f"Stream {stream_id}: Suspected looking at another's answers ({direction})")
+            cls = int(box.cls[0])
+            label = yolo_model.names.get(cls, "unknown")  # Use get to avoid mock issues
+            conf = float(box.conf) if box.conf else 0.0
+            # Handle both tensor and list for xyxy
+            xyxy = box.xyxy[0].tolist() if hasattr(box.xyxy[0], 'tolist') else box.xyxy[0]
+            all_objects.append(f"{label} (conf={conf:.2f}, box={xyxy})")
+            if label == 'cell phone' and conf >= phone_conf:
+                phone_detected = True
+                detected_objects.append({'label': label, 'box': xyxy})
+                frame_phone_detections.append({'box': xyxy, 'conf': conf})
+            elif label in ['book', 'paper'] and conf >= base_conf:
+                detected_objects.append({'label': label, 'box': xyxy})
+        # Temporal consistency for phone detection
+        prev_detections = prev_phone_detections.get(sid, [])
+        prev_phone_detections[sid] = frame_phone_detections
+        if not phone_detected and prev_detections:
+            for prev_box in prev_detections:
+                for curr_box in r.boxes:
+                    if not curr_box.cls:
+                        continue
+                    curr_label = yolo_model.names.get(int(curr_box.cls[0]), "unknown")
+                    curr_conf = float(curr_box.conf) if curr_box.conf else 0.0
+                    curr_xyxy = curr_box.xyxy[0].tolist() if hasattr(curr_box.xyxy[0], 'tolist') else curr_box.xyxy[0]
+                    iou = calculate_iou(prev_box['box'], curr_xyxy)
+                    if iou > 0.5 and curr_conf >= phone_conf * 0.8:
+                        detected_objects.append({'label': 'cell phone', 'box': curr_xyxy})
+                        phone_detected = True
+                        print(f"Stream {sid}: Phone detection recovered via temporal consistency, IoU={iou:.2f}")
+        print(f"Stream {sid}: All detected objects: {all_objects}")
+        detected_classes = [yolo_model.names.get(int(box.cls[0]), "unknown") for box in r.boxes if box.cls] if r.boxes else []
+        print(f"Stream {sid}: Detected classes: {detected_classes}")
+        if not phone_detected:
+            print(f"Stream {sid}: No cell phone detected. Check image quality, lighting, or consider fine-tuning model.")
+        outputs.append((detected_objects, all_objects))
+    return outputs
+
+async def batch_process_pose(imgs, stream_ids, prev_keypoints_map, prev_head_angles_map, prev_looking_down_start_map):
+    pose_results = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: pose_model(imgs, conf=0.2, device=device)
+    )
+    outputs = []
+    hand_movement_history = get_hand_movement_history_map()
+    
+    for pr, sid in zip(pose_results, stream_ids):
+        incidents = []
+        current_keypoints = []
+        current_head_angles = []
+        person_hands = []
+        current_looking_down_start = []
+        current_time = datetime.datetime.now(pytz.UTC).timestamp()
+        prev_keypoints = prev_keypoints_map.get(sid)
+        prev_head_angles = prev_head_angles_map.get(sid, [])
+        prev_looking_down_start = prev_looking_down_start_map.get(sid, [])
+        frame_count = get_frame_count_map().get(sid, 0)
+        frame_count += 1
+        get_frame_count_map()[sid] = frame_count
+        
+        # Initialize hand movement history for this stream
+        if sid not in hand_movement_history:
+            hand_movement_history[sid] = {}
+        
+        print(f"Stream {sid}: Pose results - boxes: {bool(pr.boxes)}, keypoints: {bool(pr.keypoints)}")
+        if pr and pr.boxes and pr.keypoints:
+            boxes = pr.boxes
+            keypoints = pr.keypoints
+            print(f"Stream {sid}: Number of boxes: {len(boxes)}, Number of keypoints: {len(keypoints.xy)}")
+            for idx in range(len(boxes)):
+                if boxes.conf[idx] < 0.2:
+                    print(f"Stream {sid}: Skipping person {idx} due to low confidence {boxes.conf[idx]:.2f}")
+                    continue
+                kp = keypoints.xy[idx].tolist()
+                kp_conf = keypoints.conf[idx].tolist()
+                current_keypoints.append(kp)
+                print(f"Stream {sid}: Processing person {idx} with confidence {boxes.conf[idx]:.2f}")
+                if len(kp) >= 17:
+                    nose = kp[0]
+                    left_ear = kp[3]
+                    right_ear = kp[4]
+                    left_eye = kp[1]
+                    right_eye = kp[2]
+                    left_shoulder = kp[5]
+                    right_shoulder = kp[6]
+                    neck = [(left_shoulder[0] + right_shoulder[0]) / 2, (left_shoulder[1] + right_shoulder[1]) / 2] if kp_conf[5] >= 0.2 and kp_conf[6] >= 0.2 else None
+                    missing_ear = (kp_conf[3] < 0.2 or left_ear[0] == 0) or (kp_conf[4] < 0.2 or right_ear[0] == 0)
+                    one_ear_missing = (kp_conf[3] < 0.2 or left_ear[0] == 0) != (kp_conf[4] < 0.2 or right_ear[0] == 0)
+                    use_eyes = False
+                    if missing_ear:
+                        use_eyes = True
+                        left_point = left_eye
+                        right_point = right_eye
+                        left_conf = kp_conf[1]
+                        right_conf = kp_conf[2]
+                    else:
+                        left_point = left_ear
+                        right_point = right_ear
+                        left_conf = kp_conf[3]
+                        right_conf = kp_conf[4]
+                    print(f"Stream {sid}: Keypoint conf - Nose: {kp_conf[0]:.2f}, Left {'eye' if use_eyes else 'ear'}: {left_conf:.2f}, Right {'eye' if use_eyes else 'ear'}: {right_conf:.2f}")
+                    if (nose[0] != 0 and left_point[0] != 0 and right_point[0] != 0 and
+                        left_shoulder[0] != 0 and right_shoulder[0] != 0 and
+                        kp_conf[0] >= 0.2 and left_conf >= 0.2 and right_conf >= 0.2 and
+                        kp_conf[5] >= 0.2 and kp_conf[6] >= 0.2):
+                        head_angle = np.arctan2(right_point[1] - left_point[1], right_point[0] - left_point[0]) * 180 / np.pi
+                        shoulder_angle = np.arctan2(right_shoulder[1] - left_shoulder[1], right_shoulder[0] - left_shoulder[0]) * 180 / np.pi
+                        relative_angle = abs((head_angle - shoulder_angle + 180) % 360 - 180)
+                        current_head_angles.append(relative_angle)
+                        print(f"Stream {sid}: Head angle: {head_angle:.2f}, Shoulder angle: {shoulder_angle:.2f}, Relative angle: {relative_angle:.2f}, "
+                              f"Using eyes: {use_eyes}, Keypoints: nose={nose}, left_ear={left_ear}, right_ear={right_ear}, "
+                              f"left_shoulder={left_shoulder}, right_shoulder={right_shoulder}")
+                        direction = "left" if head_angle > shoulder_angle else "right"
+                        if relative_angle > 30 or (one_ear_missing and missing_ear):
+                            if relative_angle > 40 or (one_ear_missing and missing_ear):
+                                incidents.append(f"looking_at_answers_{direction}")
+                                print(f"Stream {sid}: Suspected looking at another's answers ({direction})")
+                            else:
+                                incidents.append("communication_suspected")
+                                print(f"Stream {sid}: Communication suspected")
                         else:
-                            incidents.append("communication_suspected")
-                            print(f"Stream {stream_id}: Communication suspected")
+                            print(f"Stream {sid}: No significant head turn detected")
                     else:
-                        print(f"Stream_id {stream_id}: No significant head turn detected")
-                else:
-                    if one_ear_missing:
-                        direction = "right" if kp_conf[3] < 0.3 or left_ear[0] == 0 else "left"
-                        incidents.append(f"looking_at_answers_{direction}")
-                        print(f"Stream {stream_id}: Suspected looking at another's answers ({direction}) due to missing keypoint")
+                        if one_ear_missing:
+                            direction = "right" if kp_conf[3] < 0.2 or left_ear[0] == 0 else "left"
+                            incidents.append(f"looking_at_answers_{direction}")
+                            print(f"Stream {sid}: Suspected looking at another's answers ({direction}) due to missing keypoint")
+                        else:
+                            print(f"Stream {sid}: Insufficient keypoint confidence or missing keypoints: "
+                                  f"Nose conf={kp_conf[0]:.2f}, Left {'eye' if use_eyes else 'ear'} conf={left_conf:.2f}, "
+                                  f"Right {'eye' if use_eyes else 'ear'} conf={right_conf:.2f}, "
+                                  f"Left shoulder conf={kp_conf[5]:.2f}, Right shoulder conf={kp_conf[6]:.2f}")
+                    # Looking down detection using head tilt
+                    looking_down = False
+                    if neck and kp_conf[0] >= 0.2 and kp_conf[5] >= 0.2 and kp_conf[6] >= 0.2:
+                        head_vector = [nose[0] - neck[0], nose[1] - neck[1]]
+                        vertical_vector = [0, -1]
+                        dot_product = head_vector[1] * vertical_vector[1]
+                        norm_product = np.sqrt(head_vector[0]**2 + head_vector[1]**2) * np.sqrt(vertical_vector[0]**2 + vertical_vector[1]**2)
+                        cos_theta = dot_product / norm_product if norm_product != 0 else 0
+                        head_tilt_angle = np.arccos(np.clip(cos_theta, -1.0, 1.0)) * 180 / np.pi
+                        if head_tilt_angle > 30 and nose[1] > neck[1]:
+                            looking_down = True
+                            print(f"Stream {sid}: Person {idx} looking down (head tilt angle={head_tilt_angle:.2f} degrees)")
+                    if looking_down:
+                        if idx < len(prev_looking_down_start) and prev_looking_down_start[idx] is None:
+                            current_looking_down_start.append(current_time)
+                        else:
+                            current_looking_down_start.append(prev_looking_down_start[idx] if idx < len(prev_looking_down_start) else current_time)
+                        start_time = current_looking_down_start[-1]
+                        duration = current_time - start_time
+                        if duration >= 2:
+                            incidents.append("looking_down_suspected")
+                            print(f"Stream {sid}: Looking down suspected for person {idx}, duration={duration:.2f}s")
                     else:
-                        print(f"Stream {stream_id}: Insufficient keypoint confidence or missing keypoints: "
-                              f"Nose conf={kp_conf[0]:.2f}, Left {'eye' if use_eyes else 'ear'} conf={left_conf:.2f}, "
-                              f"Right {'eye' if use_eyes else 'ear'} conf={right_conf:.2f}, "
-                              f"Left shoulder conf={kp_conf[5]:.2f}, Right shoulder conf={kp_conf[6]:.2f}")
-                # Looking down detection
-                looking_down = False
-                if kp_conf[0] >= 0.3 and kp_conf[1] >= 0.3 and kp_conf[2] >= 0.3:
-                    avg_eyes_y = (left_eye[1] + right_eye[1]) / 2
-                    nose_y = nose[1]
-                    if nose_y > avg_eyes_y + 10:  # Increased threshold for reliability
-                        looking_down = True
-                        print(f"Stream {stream_id}: Person {idx} looking down (nose_y={nose_y:.2f}, avg_eyes_y={avg_eyes_y:.2f})")
-                if looking_down:
-                    current_looking_down_timestamps.append(current_time)
+                        current_looking_down_start.append(None)
+                    # Collect hands
+                    left_hand = kp[9] if kp_conf[9] >= 0.2 else None
+                    right_hand = kp[10] if kp_conf[10] >= 0.2 else None
+                    person_hands.append({'left': left_hand, 'right': right_hand, 'person_idx': idx})
+                    # Log hand keypoint confidence
+                    print(f"Stream {sid}: Person {idx} hand keypoints - Left wrist conf={kp_conf[9]:.2f}, Right wrist conf={kp_conf[10]:.2f}")
+                    # Check if hands are close to each other for potential paper usage (primary condition)
+                    if left_hand and right_hand and left_hand[0] != 0 and right_hand[0] != 0 and kp_conf[9] >= 0.2 and kp_conf[10] >= 0.2:
+                        hand_dist = np.sqrt((left_hand[0] - right_hand[0])**2 + (left_hand[1] - right_hand[1])**2)
+                        print(f"Stream {sid}: Person {idx} hand distance: {hand_dist:.2f} pixels")
+                        if hand_dist < 30:
+                            incidents.append("potential_paper_usage")
+                            print(f"Stream {sid}: Potential paper usage by person {idx}, hands close (dist={hand_dist:.2f})")
                 else:
-                    current_looking_down_timestamps.append(None)
-                # Collect hands
-                left_hand = kp[9] if kp_conf[9] >= 0.3 else None
-                right_hand = kp[10] if kp_conf[10] >= 0.3 else None
-                person_hands.append({'left': left_hand, 'right': right_hand})
-            else:
-                print(f"Stream {stream_id}: No valid keypoints for person {idx}")
-                current_looking_down_timestamps.append(None)
-        # Check closeness between hands of different persons
-        for p1 in range(len(person_hands)):
-            for p2 in range(p1 + 1, len(person_hands)):
-                hands1 = [h for h in [person_hands[p1]['left'], person_hands[p1]['right']] if h]
-                hands2 = [h for h in [person_hands[p2]['left'], person_hands[p2]['right']] if h]
-                for h1 in hands1:
-                    for h2 in hands2:
-                        dist = np.sqrt((h1[0] - h2[0])**2 + (h1[1] - h2[1])**2)
-                        if dist < 30:
-                            incidents.append("paper_passing_suspected")
-                            print(f"Stream {stream_id}: Paper passing suspected between persons {p1} and {p2}, dist {dist:.2f}")
-        # Sort keypoints by nose x for matching across frames
-        if current_keypoints:
-            current_keypoints.sort(key=lambda kp: kp[0][0] if len(kp) > 0 else 0)
-        if prev_keypoints:
-            prev_keypoints.sort(key=lambda kp: kp[0][0] if len(kp) > 0 else 0)
-        # Individual hand movement check
-        if prev_keypoints and len(prev_keypoints) == len(current_keypoints):
-            for p in range(len(current_keypoints)):
-                prev_kp = prev_keypoints[p]
-                curr_kp = current_keypoints[p]
-                kp_conf = keypoints.conf[p].tolist() if 'conf' in keypoints.data else [0.0] * 17
-                left_hand = curr_kp[9]
-                right_hand = curr_kp[10]
-                prev_left = prev_kp[9]
-                prev_right = prev_kp[10]
-                if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.3:
-                    left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
-                    if left_dist > 30:
-                        incidents.append("paper_passing_suspected")
-                if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.3:
-                    right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
-                    if right_dist > 30:
-                        incidents.append("paper_passing_suspected")
-        # Looking down persistence
-        if prev_looking_down_timestamps and len(prev_looking_down_timestamps) == len(current_looking_down_timestamps):
-            for p in range(len(current_looking_down_timestamps)):
-                if current_looking_down_timestamps[p] and prev_looking_down_timestamps[p]:
-                    duration = current_time - prev_looking_down_timestamps[p]
-                    if duration >= 2:
-                        incidents.append("looking_down_suspected")
-                        print(f"Stream {stream_id}: Looking down suspected for person {p}, duration {duration:.2f}s")
-                elif current_looking_down_timestamps[p] is None:
-                    current_looking_down_timestamps[p] = None  # Reset timestamp if not looking down
+                    print(f"Stream {sid}: No valid keypoints for person {idx}")
+                    current_looking_down_start.append(None)
+            # Check closeness between hands of different persons for paper passing
+            for p1 in range(len(person_hands)):
+                for p2 in range(p1 + 1, len(person_hands)):
+                    hands1 = [h for h in [person_hands[p1]['left'], person_hands[p1]['right']] if h]
+                    hands2 = [h for h in [person_hands[p2]['left'], person_hands[p2]['right']] if h]
+                    for h1 in hands1:
+                        for h2 in hands2:
+                            dist = np.sqrt((h1[0] - h2[0])**2 + (h1[1] - h2[1])**2)
+                            if dist < 30:
+                                incidents.append("paper_passing_suspected")
+                                print(f"Stream {sid}: Paper passing suspected between persons {p1} and {p2}, dist={dist:.2f}")
+            # Check single person's hand movement for potential paper usage (secondary condition)
+            if prev_keypoints and len(prev_keypoints) == len(current_keypoints):
+                for p in range(len(current_keypoints)):
+                    person_id = f"{sid}_person_{p}"
+                    if person_id not in hand_movement_history:
+                        hand_movement_history[person_id] = {'left': deque(maxlen=2), 'right': deque(maxlen=2)}
+                    
+                    prev_kp = prev_keypoints[p]
+                    curr_kp = current_keypoints[p]
+                    kp_conf = keypoints.conf[p].tolist() if hasattr(keypoints, 'has_visible') and keypoints.has_visible else [0.0] * 17
+                    left_hand = curr_kp[9]
+                    right_hand = curr_kp[10]
+                    prev_left = prev_kp[9]
+                    prev_right = prev_kp[10]
+                    # Check for significant hand movement
+                    if left_hand[0] != 0 and prev_left[0] != 0 and kp_conf[9] >= 0.2:
+                        left_dist = np.sqrt((left_hand[0] - prev_left[0])**2 + (left_hand[1] - prev_left[1])**2)
+                        hand_movement_history[person_id]['left'].append(left_dist > 40)
+                        if len(hand_movement_history[person_id]['left']) == 2 and all(hand_movement_history[person_id]['left']):
+                            incidents.append("potential_paper_usage")
+                            print(f"Stream {sid}: Potential paper usage by person {p}, left hand movement dist={left_dist:.2f}, consistent over 2 frames")
+                    if right_hand[0] != 0 and prev_right[0] != 0 and kp_conf[10] >= 0.2:
+                        right_dist = np.sqrt((right_hand[0] - prev_right[0])**2 + (right_hand[1] - prev_right[1])**2)
+                        hand_movement_history[person_id]['right'].append(right_dist > 40)
+                        if len(hand_movement_history[person_id]['right']) == 2 and all(hand_movement_history[person_id]['right']):
+                            incidents.append("potential_paper_usage")
+                            print(f"Stream {sid}: Potential paper usage by person {p}, right hand movement dist={right_dist:.2f}, consistent over 2 frames")
         else:
-            print(f"Stream {stream_id}: No previous looking down state")
-    else:
-        print(f"Stream {stream_id}: No pose detections")
-        current_looking_down_timestamps = [None] * len(current_keypoints)
-    print(f"Stream {stream_id}: Pose incidents: {incidents}, Head angles: {current_head_angles}")
-    return incidents, current_keypoints, current_head_angles, current_looking_down_timestamps
+            print(f"Stream {sid}: No pose detections")
+            current_looking_down_start = [None] * len(current_keypoints)
+        print(f"Stream {sid}: Pose incidents: {incidents}, Head angles: {current_head_angles}")
+        outputs.append((incidents, current_keypoints, current_head_angles, current_looking_down_start))
+    return outputs
 
 # Detect cheating endpoint
 @app.post("/detect")
 async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
     results = []
     wat_tz = pytz.timezone('Africa/Lagos')
-    prev_keypoints_map = {}
-    prev_head_angles_map = {}
-    prev_looking_down_timestamps_map = {}
+    prev_keypoints_map = get_prev_keypoints_map()
+    prev_head_angles_map = get_prev_head_angles_map()
+    prev_looking_down_start_map = get_prev_looking_down_start_map()
+    imgs = []
+    stream_ids = []
+    stream_data_map = {}
     try:
         for stream in data.streams:
             if not stream.stream_id:
@@ -344,45 +483,54 @@ async def detect_cheating(data: MultiStreamData, db: Session = Depends(get_db)):
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
                 raise HTTPException(status_code=422, detail=f"Invalid image format for stream {stream.stream_id}")
-            img_resized = cv2.resize(img, (192, 192), interpolation=cv2.INTER_AREA)
+            # Resize to 416px width for faster processing
+            height, width = img.shape[:2]
+            new_width = 416
+            new_height = int(height * (new_width / width))
+            img_resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             rgb_img = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-            detected_objects, all_objects = await process_yolo(rgb_img, stream.stream_id)
-            pose_incidents, current_keypoints, current_head_angles, current_looking_down_timestamps = await process_pose(
-                rgb_img, stream.stream_id, 
-                prev_keypoints_map.get(stream.stream_id), 
-                prev_head_angles_map.get(stream.stream_id, []),
-                prev_looking_down_timestamps_map.get(stream.stream_id, [])
-            )
-            prev_keypoints_map[stream.stream_id] = current_keypoints
-            prev_head_angles_map[stream.stream_id] = current_head_angles
-            prev_looking_down_timestamps_map[stream.stream_id] = current_looking_down_timestamps
-            primary_incident = "Normal"
-            if detected_objects:
-                primary_incident = f"Objects Detected: {', '.join([obj['label'] for obj in detected_objects])}"
-            elif pose_incidents:
-                primary_incident = f"Pose Incidents: {', '.join(pose_incidents)}"
-            print(f"Stream {stream.stream_id}: Status: {'suspicious' if detected_objects or pose_incidents else 'normal'}, "
-                  f"Objects: {[obj['label'] for obj in detected_objects]}, Pose: {pose_incidents}, Primary: {primary_incident}")
-            incidents = []
-            if detected_objects:
-                incidents.append(f"objects_detected: {', '.join([obj['label'] for obj in detected_objects])}")
-            incidents.extend(pose_incidents)
-            for incident_type in incidents:
-                incident = CheatingIncident(
-                    user_id=stream.user_id,
-                    exam_id=stream.exam_id,
-                    stream_id=stream.stream_id,
-                    incident_type=incident_type,
-                    timestamp=datetime.datetime.now(wat_tz)
-                )
-                db.add(incident)
-            results.append({
-                "stream_id": stream.stream_id,
-                "status": "suspicious" if incidents else "normal",
-                "objects": [obj['label'] for obj in detected_objects],
-                "pose_incidents": pose_incidents,
-                "primary_incident": primary_incident
-            })
+            imgs.append(rgb_img)
+            stream_ids.append(stream.stream_id)
+            stream_data_map[stream.stream_id] = stream
+
+        if imgs:
+            yolo_outputs = await batch_process_yolo(imgs, stream_ids)
+            pose_outputs = await batch_process_pose(imgs, stream_ids, prev_keypoints_map, prev_head_angles_map, prev_looking_down_start_map)
+
+            for sid, yolo_out, pose_out in zip(stream_ids, yolo_outputs, pose_outputs):
+                detected_objects, all_objects = yolo_out
+                pose_incidents, current_keypoints, current_head_angles, current_looking_down_start = pose_out
+                prev_keypoints_map[sid] = current_keypoints
+                prev_head_angles_map[sid] = current_head_angles
+                prev_looking_down_start_map[sid] = current_looking_down_start
+                primary_incident = "Normal"
+                if detected_objects:
+                    primary_incident = f"Objects Detected: {', '.join([obj['label'] for obj in detected_objects])}"
+                elif pose_incidents:
+                    primary_incident = f"Pose Incidents: {', '.join(pose_incidents)}"
+                print(f"Stream {sid}: Status: {'suspicious' if detected_objects or pose_incidents else 'normal'}, "
+                      f"Objects: {[obj['label'] for obj in detected_objects]}, Pose: {pose_incidents}, Primary: {primary_incident}")
+                incidents = []
+                if detected_objects:
+                    incidents.append(f"objects_detected: {', '.join([obj['label'] for obj in detected_objects])}")
+                incidents.extend(pose_incidents)
+                stream = stream_data_map[sid]
+                for incident_type in incidents:
+                    incident = CheatingIncident(
+                        user_id=stream.user_id,
+                        exam_id=stream.exam_id,
+                        stream_id=sid,
+                        incident_type=incident_type,
+                        timestamp=datetime.datetime.now(wat_tz)
+                    )
+                    db.add(incident)
+                results.append({
+                    "stream_id": sid,
+                    "status": "suspicious" if incidents else "normal",
+                    "objects": [obj['label'] for obj in detected_objects],
+                    "pose_incidents": pose_incidents,
+                    "primary_incident": primary_incident
+                })
         db.commit()
         return results
     except Exception as e:
@@ -419,6 +567,7 @@ async def generate_seating(
         if not all(col in df.columns for col in required_columns):
             raise ValueError(f"CSV must contain columns: {', '.join(required_columns)}")
         
+        df['student_id'] = df['student_id'].astype(int)  # Convert student_id to integer
         df['grade'] = pd.to_numeric(df['grade'], errors='coerce')
         df['times_cheated'] = pd.to_numeric(df['times_cheated'], errors='coerce')
         df['risk'] = df['times_cheated'] * 10 + (100 - df['grade']) / 10
