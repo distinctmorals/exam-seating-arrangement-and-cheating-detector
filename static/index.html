@@ -3,52 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Exam Cheating Detector</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Exam Proctoring Login</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com/" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?display=swap&family=Inter:wght@400;500;600;700;900&family=Noto+Sans:wght@400;500;700;900" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <style type="text/tailwindcss">
+        :root {
+            --primary-50: #eff6ff;
+            --primary-100: #dbeafe;
+            --primary-200: #bfdbfe;
+            --primary-300: #93c5fd;
+            --primary-400: #60a5fa;
+            --primary-500: #3b82f6;
+            --primary-600: #2563eb;
+            --primary-700: #1d4ed8;
+            --primary-800: #1e40af;
+            --primary-900: #1e3a8a;
+            --primary-950: #172554;
+        }
+        .material-symbols-outlined {
+            font-variation-settings:
+                'FILL' 1,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 24
+        }
+    </style>
 </head>
-<body class="bg-gray-100 flex items-center justify-center min-h-screen">
-    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-        <!-- Login Form -->
-        <div id="login-form">
-            <h2 class="text-2xl font-bold mb-6 text-center">Login</h2>
-            <form action="/login" method="POST" class="space-y-4">
-                <div>
-                    <label for="login-username" class="block text-sm font-medium text-gray-700">Username</label>
-                    <input type="text" id="login-username" name="username" required
-                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+<body class="bg-gray-950 text-white" style="font-family: Inter, 'Noto Sans', sans-serif;">
+    <div class="flex min-h-screen items-center justify-center">
+        <div class="bg-gray-900 p-8 rounded-lg shadow-lg w-full max-w-md">
+            <!-- Login Form -->
+            <div id="login-form">
+                <div class="flex items-center gap-3 mb-6">
+                    <span class="material-symbols-outlined text-primary-400">login</span>
+                    <h2 class="text-2xl font-bold text-white">Login</h2>
                 </div>
-                <div>
-                    <label for="login-password" class="block text-sm font-medium text-gray-700">Password</label>
-                    <input type="password" id="login-password" name="password" required
-                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                <form action="/login" method="POST" class="space-y-4">
+                    <div>
+                        <label for="login-username" class="block text-sm font-medium text-gray-300">Username</label>
+                        <input type="text" id="login-username" name="username" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <div>
+                        <label for="login-password" class="block text-sm font-medium text-gray-300">Password</label>
+                        <input type="password" id="login-password" name="password" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-primary-600 text-white py-2 px-4 rounded-md hover:bg-primary-700 transition-colors">Login</button>
+                    <p class="mt-4 text-center text-sm text-gray-400">
+                        Don't have an account? <a href="#" onclick="toggleForm('signup')" class="text-primary-400 hover:text-primary-300 hover:underline">Sign up</a>
+                    </p>
+                </form>
+            </div>
+            <!-- Signup Form -->
+            <div id="signup-form" class="hidden">
+                <div class="flex items-center gap-3 mb-6">
+                    <span class="material-symbols-outlined text-primary-400">person_add</span>
+                    <h2 class="text-2xl font-bold text-white">Sign Up</h2>
                 </div>
-                <button type="submit"
-                        class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Login</button>
-                <p class="mt-4 text-center text-sm">
-                    Don't have an account? <a href="#" onclick="toggleForm('signup')" class="text-indigo-600 hover:underline">Sign up</a>
-                </p>
-            </form>
-        </div>
-        <!-- Signup Form -->
-        <div id="signup-form" class="hidden">
-            <h2 class="text-2xl font-bold mb-6 text-center">Sign Up</h2>
-            <form action="/signup" method="POST" class="space-y-4">
-                <div>
-                    <label for="signup-username" class="block text-sm font-medium text-gray-700">Username</label>
-                    <input type="text" id="signup-username" name="username" required
-                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
-                </div>
-                <div>
-                    <label for="signup-password" class="block text-sm font-medium text-gray-700">Password</label>
-                    <input type="password" id="signup-password" name="password" required
-                           class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
-                </div>
-                <button type="submit"
-                        class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Sign Up</button>
-                <p class="mt-4 text-center text-sm">
-                    Already have an account? <a href="#" onclick="toggleForm('login')" class="text-indigo-600 hover:underline">Login</a>
-                </p>
-            </form>
+                <form action="/signup" method="POST" class="space-y-4">
+                    <div>
+                        <label for="signup-username" class="block text-sm font-medium text-gray-300">Username</label>
+                        <input type="text" id="signup-username" name="username" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <div>
+                        <label for="signup-password" class="block text-sm font-medium text-gray-300">Password</label>
+                        <input type="password" id="signup-password" name="password" required
+                               class="mt-1 block w-full px-3 py-2 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-primary-600 text-white py-2 px-4 rounded-md hover:bg-primary-700 transition-colors">Sign Up</button>
+                    <p class="mt-4 text-center text-sm text-gray-400">
+                        Already have an account? <a href="#" onclick="toggleForm('login')" class="text-primary-400 hover:text-primary-300 hover:underline">Login</a>
+                    </p>
+                </form>
+            </div>
         </div>
     </div>
     <script>

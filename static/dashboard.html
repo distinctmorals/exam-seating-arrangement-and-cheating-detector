@@ -3,69 +3,43 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Exam Cheating Detector Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css">
-    <style>
-        .sidebar {
-            height: 100vh;
-            width: 260px;
-            position: fixed;
-            top: 0;
-            left: 0;
-            background-color: #2b527a; /* Dark blue sidebar */
-            padding-top: 20px;
-            transition: all 0.3s;
-            color: white;
+    <title>Exam Proctoring Dashboard</title>
+    <link rel="preconnect" href="https://fonts.gstatic.com/" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?display=swap&family=Inter:wght@400;500;600;700;900&family=Noto+Sans:wght@400;500;700;900" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <style type="text/tailwindcss">
+        :root {
+            --primary-50: #eff6ff;
+            --primary-100: #dbeafe;
+            --primary-200: #bfdbfe;
+            --primary-300: #93c5fd;
+            --primary-400: #60a5fa;
+            --primary-500: #3b82f6;
+            --primary-600: #2563eb;
+            --primary-700: #1d4ed8;
+            --primary-800: #1e40af;
+            --primary-900: #1e3a8a;
+            --primary-950: #172554;
         }
-        .sidebar h2 {
-            font-size: 1.5rem;
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 1.5rem;
-        }
-        .sidebar a {
-            padding: 12px 20px;
-            text-decoration: none;
-            font-size: 16px;
-            color: white;
-            display: block;
-            transition: background-color 0.2s;
-        }
-        .sidebar a:hover, .sidebar a.active {
-            background-color: #1e3a5f; /* Slightly lighter blue on hover/active */
-        }
-        .content {
-            margin-left: 260px;
-            padding: 20px;
-            background-color: #f9fafb; /* Light gray background */
-        }
-        .header {
-            background-color: #ffffff;
-            padding: 15px 20px;
-            border-bottom: 1px solid #e0e7ff;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        }
-        .header h1 {
-            font-size: 1.5rem;
-            font-weight: bold;
-            color: #2b527a;
+        .material-symbols-outlined {
+            font-variation-settings:
+                'FILL' 1,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 24
         }
         .video-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 1.5rem;
-            margin-bottom: 1.5rem;
         }
         .video-container {
             position: relative;
-            border: 2px solid #e0e7ff;
+            border: 2px solid var(--primary-200);
             border-radius: 0.75rem;
             overflow: hidden;
-            background-color: #ffffff;
+            background-color: #1f2937; /* gray-800 */
         }
         .stream-status {
             position: absolute;
@@ -79,7 +53,6 @@
             z-index: 10;
         }
         .status {
-            margin-bottom: 1.5rem;
             padding: 1rem;
             border-radius: 0.75rem;
             text-align: center;
@@ -87,18 +60,6 @@
         }
         .status.normal { background-color: #d1fae5; color: #047857; }
         .status.suspicious { background-color: #fee2e2; color: #dc2626; }
-        #incidents {
-            margin-bottom: 1.5rem;
-            background-color: #ffffff;
-            padding: 1.5rem;
-            border-radius: 0.75rem;
-            border: 1px solid #e0e7ff;
-        }
-        #incidents h2 {
-            font-size: 1.25rem;
-            font-weight: bold;
-            margin-bottom: 1rem;
-        }
         #incident-list {
             max-height: 250px;
             overflow-y: auto;
@@ -107,92 +68,113 @@
         table {
             width: 100%;
             border-collapse: collapse;
-            background-color: #ffffff;
-            border: 1px solid #e0e7ff;
+            background-color: #1f2937; /* gray-800 */
+            border: 1px solid var(--primary-200);
         }
         td {
-            border: 1px solid #e0e7ff;
+            border: 1px solid var(--primary-200);
             padding: 0.75rem;
             text-align: center;
-            background-color: #f9fafb;
-        }
-        form {
-            background-color: #ffffff;
-            padding: 1.5rem;
-            border-radius: 0.75rem;
-            border: 1px solid #e0e7ff;
-        }
-        form label {
-            font-size: 0.875rem;
-            font-weight: 500;
-            color: #374151;
-        }
-        form input {
-            margin-top: 0.25rem;
-            border-color: #d1d5db;
-        }
-        button {
-            margin-top: 1rem;
+            background-color: #374151; /* gray-700 */
         }
     </style>
 </head>
-<body class="bg-gray-100 font-sans">
-    <div class="sidebar">
-        <h2>Proctoring Hub</h2>
-        <a href="#" class="active">Dashboard</a>
-        <a href="#">Settings</a>
-        <a href="#">Reports</a>
-    </div>
+<body class="bg-gray-950 text-white" style="font-family: Inter, 'Noto Sans', sans-serif;">
+    <div class="flex min-h-screen">
+        <!-- Sidebar -->
+        <aside class="w-64 flex-shrink-0 bg-gray-900 p-6 flex flex-col justify-between">
+            <div class="flex flex-col gap-8">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-primary-600 rounded-full"></div>
+                    <h1 class="text-xl font-bold">Proctoring Hub</h1>
+                </div>
+                <nav class="flex flex-col gap-2">
+                    <a class="flex items-center gap-3 px-3 py-2.5 rounded-md bg-primary-600" href="#">
+                        <span class="material-symbols-outlined text-white">dashboard</span>
+                        <p class="text-white text-sm font-medium">Dashboard</p>
+                    </a>
+                </nav>
+            </div>
+            <div class="flex flex-col gap-2">
+                <a class="flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-gray-800 transition-colors" href="#">
+                    <span class="material-symbols-outlined text-gray-400">settings</span>
+                    <p class="text-gray-300 text-sm font-medium">Settings</p>
+                </a>
+                <a id="logoutLink" class="flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-gray-800 transition-colors" href="/logout?session_id={session_id}">
+                    <span class="material-symbols-outlined text-gray-400">logout</span>
+                    <p class="text-gray-300 text-sm font-medium">Logout</p>
+                </a>
+            </div>
+        </aside>
 
-    <div class="content">
-        <header class="header">
-            <h1>Exam Proctoring Dashboard</h1>
-            <div>
-                <a id="logoutLink" href="/logout" class="text-blue-600 hover:text-blue-800 font-medium">Log Out</a>
-            </div>
-        </header>
+        <!-- Main Content -->
+        <main class="flex-1 p-8 grid grid-cols-3 gap-8">
+            <div class="col-span-2 flex flex-col">
+                <header class="flex justify-between items-center mb-8">
+                    <div>
+                        <h2 class="text-3xl font-bold">Invigilator Dashboard</h2>
+                        <p class="text-gray-400">Real-time monitoring of exam session</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <button class="flex items-center justify-center w-10 h-10 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors">
+                            <span class="material-symbols-outlined">search</span>
+                        </button>
+                        <button class="flex items-center justify-center w-10 h-10 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors">
+                            <span class="material-symbols-outlined">notifications</span>
+                        </button>
+                        <div class="w-10 h-10 rounded-full bg-gray-700"></div>
+                    </div>
+                </header>
 
-        <section id="proctoringSection" style="display: none;" class="mt-6">
-            <div class="mb-4">
-                <label for="cameraSelect" class="block text-sm font-medium text-gray-700">Select Camera</label>
-                <select id="cameraSelect" class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"></select>
-            </div>
-            <div class="video-grid">
-                <!-- Video stream will be dynamically added here -->
-            </div>
-            <div id="status" class="status">
-                <span id="statusIcon" class="mr-2"></span>
-                <span id="statusText">Initializing...</span>
-            </div>
-            <div id="incidents">
-                <div class="flex justify-between items-center mb-2">
-                    <h2>Detected Incidents</h2>
-                    <button id="toggleIncidents" class="text-blue-600 hover:text-blue-800 text-sm">Show/Hide</button>
-                </div>
-                <ul id="incident-list" class="mt-2 space-y-2 hidden"></ul>
-            </div>
-        </section>
+                <!-- Proctoring Section -->
+                <section id="proctoringSection" class="bg-gray-900 rounded-lg p-4 flex-1 relative">
+                    <div class="mb-4">
+                        <label for="cameraSelect" class="block text-sm font-medium text-gray-300">Select Camera</label>
+                        <select id="cameraSelect" class="mt-1 block w-full p-2 border border-gray-600 bg-gray-800 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"></select>
+                    </div>
+                    <div class="video-grid">
+                        <!-- Video stream will be dynamically added here -->
+                    </div>
+                    <div id="status" class="status mt-4">
+                        <span id="statusIcon" class="mr-2"></span>
+                        <span id="statusText">Initializing...</span>
+                    </div>
+                </section>
 
-        <section class="mt-6">
-            <h2 class="text-xl font-semibold text-gray-700 mb-4">Generate Seating Arrangement</h2>
-            <form id="seatingForm" class="space-y-4">
-                <input type="hidden" id="sessionId" name="session_id">
-                <div>
-                    <label for="csvFile">Upload CSV File</label>
-                    <input type="file" id="csvFile" name="file" accept=".csv" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required>
+                <!-- Seating Arrangement Section -->
+                <section class="mt-6 bg-gray-900 rounded-lg p-6">
+                    <h2 class="text-xl font-semibold text-white mb-4">Generate Seating Arrangement</h2>
+                    <form id="seatingForm" class="space-y-4">
+                        <input type="hidden" id="sessionId" name="session_id" value="{session_id}">
+                        <div>
+                            <label for="csvFile" class="block text-sm font-medium text-gray-300">Upload CSV File</label>
+                            <input type="file" id="csvFile" name="file" accept=".csv" class="mt-1 block w-full p-2 border border-gray-600 bg-gray-800 text-white rounded-md" required>
+                        </div>
+                        <div>
+                            <label for="rows" class="block text-sm font-medium text-gray-300">Number of Rows</label>
+                            <input type="number" id="rows" name="rows" placeholder="Number of Rows" class="mt-1 block w-full p-2 border border-gray-600 bg-gray-800 text-white rounded-md" required>
+                        </div>
+                        <div>
+                            <label for="cols" class="block text-sm font-medium text-gray-300">Number of Columns</label>
+                            <input type="number" id="cols" name="cols" placeholder="Number of Columns" class="mt-1 block w-full p-2 border border-gray-600 bg-gray-800 text-white rounded-md" required>
+                        </div>
+                        <button type="submit" class="bg-primary-600 text-white p-2 rounded-md hover:bg-primary-700 w-full transition-colors">Generate Seating</button>
+                    </form>
+                    <div id="seatingResult" class="mt-4 bg-gray-800 p-4 rounded-md overflow-auto"></div>
+                </section>
+            </div>
+
+            <!-- Real-time Alerts Section -->
+            <div class="col-span-1 bg-gray-900 rounded-lg p-6 flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-semibold text-white">Real-time Alerts</h3>
+                    <button id="toggleIncidents" class="text-primary-400 hover:text-primary-300 text-sm">Show/Hide</button>
                 </div>
-                <div>
-                    <label for="rows">Number of Rows</label>
-                    <input type="number" id="rows" name="rows" placeholder="Number of Rows" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required>
+                <div class="flex-1 flex flex-col gap-4 overflow-y-auto">
+                    <ul id="incident-list" class="space-y-2 hidden"></ul>
                 </div>
-                <div>
-                    <label for="cols">Number of Columns</label>
-                    <input type="number" id="cols" name="cols" placeholder="Number of Columns" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required>
-                </div>
-                <button type="submit" class="bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 w-full">Generate Seating</button>
-            </form>
-            <div id="seatingResult" class="mt-4 bg-gray-50 p-4 rounded-md overflow-auto"></div>
-        </section>
+            </div>
+        </main>
     </div>
 
     <script src="/static/script.js"></script>
